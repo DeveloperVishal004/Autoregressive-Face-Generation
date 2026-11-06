@@ -7,21 +7,7 @@ Original file is located at
     https://colab.research.google.com/#fileId=https%3A//storage.googleapis.com/kaggle-colab-exported-notebooks/vishal2028/neuraldiscreterepresentationlearning.e162f25a-31cd-4ab3-b518-24ca52ab9528.ipynb%3FX-Goog-Algorithm%3DGOOG4-RSA-SHA256%26X-Goog-Credential%3Dgcp-kaggle-com%2540kaggle-161607.iam.gserviceaccount.com/20260612/auto/storage/goog4_request%26X-Goog-Date%3D20260612T165128Z%26X-Goog-Expires%3D259200%26X-Goog-SignedHeaders%3Dhost%26X-Goog-Signature%3Db178478d7c5d0afce4c16aaf47388072a4edb50d3d0942ca4e36cff2462f861996da868f54d2c8fc747843a4d89528421afd07b8d0b0e6ec85981f8ece9ccc263e1f1e0e3e02855344ed052537294518bdaaed38b61061ac5680412be2e0407045ec2e48cd934667bbd3ed405a25fffe0f828e5a7699a007dd5bdaa1ca5f1e87ea03ad5262232469752feec990f60a9ca7a371c534f25837009318fad5c52e0349ed8261cc4473e461eef90fe453383bbbbb5b88b92644a30dbb8fb4f27fb780db6e18b668e88e520a7dad4ff9515845f7ac73fd69bf595895b52219ec81eeb1954d4d2dfd4dd23f6d5f4aa3cb870d47e64c011a99df95a9460de919c38d2e72
 """
 
-# IMPORTANT: SOME KAGGLE DATA SOURCES ARE PRIVATE
-# RUN THIS CELL IN ORDER TO IMPORT YOUR KAGGLE DATA SOURCES.
-import kagglehub
-kagglehub.login()
-
-# IMPORTANT: RUN THIS CELL IN ORDER TO IMPORT YOUR KAGGLE DATA SOURCES,
-# THEN FEEL FREE TO DELETE THIS CELL.
-# NOTE: THIS NOTEBOOK ENVIRONMENT DIFFERS FROM KAGGLE'S PYTHON
-# ENVIRONMENT SO THERE MAY BE MISSING LIBRARIES USED BY YOUR
-# NOTEBOOK.
-
-jessicali9530_celeba_dataset_path = kagglehub.dataset_download('jessicali9530/celeba-dataset')
-vishal2028_checkpoints_path = kagglehub.dataset_download('vishal2028/checkpoints')
-
-print('Data source import complete.')
+# (Colab-export login/download cells removed: the dataset is attached to the Kaggle kernel.)
 
 # This Python 3 environment comes with many helpful analytics libraries installed
 # It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python
@@ -49,8 +35,9 @@ import kagglehub
 
 import os
 
-for item in os.listdir('/kaggle/input/datasets/jessicali9530/celeba-dataset'):
-    print(item)
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    print(dirname, len(filenames))
+    break
 
 import os
 import glob
@@ -257,18 +244,21 @@ class VectorQuantizerEMA(nn.Module):
             encodings = F.one_hot(encoding_indices, self.num_embeddings).float()
 
             # Update cluster sizes
-            n = torch.sum(encodings, dim=0)
-            self.ema_cluster_size = self.ema_cluster_size * self.decay + n * (1 - self.decay)
+            # NOTE: all updates are IN-PLACE so they survive nn.DataParallel
+            # (re-assigning buffers only affects the per-forward replica).
+            with torch.no_grad():
+                n = torch.sum(encodings, dim=0)
+                self.ema_cluster_size.mul_(self.decay).add_(n, alpha=1 - self.decay)
 
-            # Laplace smoothing
-            n_sum = torch.sum(self.ema_cluster_size)
-            self.ema_cluster_size = ((self.ema_cluster_size + self.epsilon) /
-                                     (n_sum + self.num_embeddings * self.epsilon) * n_sum)
+                # Laplace smoothing
+                n_sum = self.ema_cluster_size.sum()
+                cs = ((self.ema_cluster_size + self.epsilon) /
+                      (n_sum + self.num_embeddings * self.epsilon) * n_sum)
 
-            # Update weights
-            dw = torch.matmul(encodings.t(), flat_x)
-            self.ema_w = self.ema_w * self.decay + dw * (1 - self.decay)
-            self.embedding.weight.data = self.ema_w / self.ema_cluster_size.unsqueeze(1)
+                # Update weights
+                dw = torch.matmul(encodings.t(), flat_x.float())
+                self.ema_w.mul_(self.decay).add_(dw, alpha=1 - self.decay)
+                self.embedding.weight.copy_(self.ema_w / cs.unsqueeze(1))
 
         # The Commitment Loss
         e_latent_loss = F.mse_loss(quantized.detach(), x)
@@ -387,38 +377,16 @@ for epoch in range(num_epochs):
     train_vq_errors.append(avg_vq)
 
     print(f"Epoch [{epoch+1}/{num_epochs}] | Recon Loss: {avg_recon:.4f} | VQ Loss: {avg_vq:.4f}")
+    _vq = (model.module if isinstance(model, nn.DataParallel) else model).vq_layer
+    print(f"   EMA check: cluster_size sum={_vq.ema_cluster_size.sum().item():.1f} | codebook |w| mean={_vq.embedding.weight.abs().mean().item():.4f}")
 
 print("🎉 Debug Training Complete!")
 
 import torch
 import torch.nn as nn
 
-print("🔄 Initiating Checkpoint Recovery...")
-
-# 1. Re-instantiate the blank architecture
-model = CelebAVQVAE(latent_dim=256, num_embeddings=512)
-
-# 2. Point to the files you just uploaded
-# IMPORTANT: Check your exact folder name in the right sidebar!
-dataset_folder = '/kaggle/input/datasets/vishal2028/checkpoints'
-weights_path = f'{dataset_folder}/vqvae_final_weights.pth'
-latents_path = f'{dataset_folder}/celeba_8x8_latents (1).npy'
-
-# 3. Load the weights into the blank model
-# We load to CPU first to prevent memory spikes, then move to GPU
-state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
-model.load_state_dict(state_dict)
-
-# 4. Set up the devices and DataParallel just like before
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-
-if torch.cuda.device_count() > 1:
-    print(f"⚡ Rewiring to {torch.cuda.device_count()} GPUs...")
-    model = nn.DataParallel(model)
-
+# (Checkpoint-recovery block removed: continue with the freshly trained model.)
 model.eval()
-print("✅ VQ-VAE fully recovered and ready for inference!")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -610,7 +578,7 @@ class MiniGPT(nn.Module):
         return logits
 
 # Initialize Data and Model
-dataset = LatentSequenceDataset('/kaggle/input/datasets/vishal2028/checkpoints/celeba_8x8_latents (1).npy', codebook_size=512)
+dataset = LatentSequenceDataset('/kaggle/working/celeba_8x8_latents.npy', codebook_size=512)
 dataloader = DataLoader(dataset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

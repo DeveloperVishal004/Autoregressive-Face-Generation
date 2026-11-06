@@ -136,8 +136,8 @@ base_model = model.module if hasattr(model, 'module') else model
 
 | Metric | Value |
 |--------|-------|
-| Normalized MSE Reconstruction Loss | 0.0829 |
-| Codebook Utilization | **512 / 512 (100%)** |
+| Normalized MSE Reconstruction Loss | 0.0566 |
+| Codebook Utilization | **491 / 512 (95.9%)** codes used across all 202,599 encoded images |
 | Active Epochs | 25 |
 | Update Strategy | EMA + Laplace Smoothing |
 
@@ -145,24 +145,24 @@ base_model = model.module if hasattr(model, 'module') else model
 
 ![Reconstruction Loss](assests/vqvae_loss_curves.png)
 
-> The reconstruction MSE (left) decays sharply and plateaus at **0.0829**. The VQ Codebook loss (right) rises monotonically — this is expected and healthy behavior. As the EMA-updated codebook vectors spread out to cluster increasingly diverse facial features, the average distance between encoder outputs and their nearest codebook entries grows. A codebook that has stopped spreading would indicate collapse, not convergence.
+> The reconstruction MSE (left) decays sharply and reaches **0.0566** after 25 epochs. The VQ Codebook loss (right) rises slightly in the first epochs (0.037 → ~0.055) and then stays flat. A flat, small VQ loss means the EMA-updated codebook is tracking the encoder outputs. (An earlier run showed this loss growing from 0.34 to ~20; that was a bug, not healthy spreading: under `nn.DataParallel` the EMA buffers were re-assigned instead of updated in-place, so the codebook never trained. See the fix in `VectorQuantizerEMA.forward`.)
 
-**Codebook utilization histogram — all 512 entries active:**
+**Codebook utilization histogram (final epoch):**
 
 ![Codebook Histogram](assests/codebook_histogram.png)
 
-> Every bar is populated with no zero-gap columns across the full 0–511 index range. The non-uniform distribution (some tokens used far more frequently than others) is natural and meaningful: high-frequency tokens represent common facial patches such as background regions and skin tones, while rarer tokens capture specific textures. This is the direct result of EMA + Laplace smoothing preventing dead codes.
+> Most of the 512 codes are used; a few indices (mostly in the 440–510 range) are unused or nearly unused, so about 4% of the codebook is effectively dead. The distribution is clearly non-uniform: a handful of codes are used far more often than the rest, which likely correspond to common patches such as background and skin tones. Dead-code reset was not implemented, so these entries stay unused.
 
 ### Mini-GPT Training
 
 | Metric | Value |
 |--------|-------|
-| Final Cross-Entropy Loss | **3.1491** |
+| Final Cross-Entropy Loss | **3.5011** |
 | Random-Guess Baseline | 6.24 (= −ln(1/512)) |
 | Effective Vocabulary at Inference | ~23 likely tokens per step |
 | Training Epochs | 10 |
 
-A loss of 3.1491 against a random baseline of 6.24 demonstrates the Transformer successfully learned the spatial grammar of human faces — understanding that hair tokens appear at the edges of the sequence, and eye/nose/mouth tokens cluster in the center.
+A loss of 3.5011 against a random baseline of 6.24 demonstrates the Transformer successfully learned the spatial grammar of human faces — understanding that hair tokens appear at the edges of the sequence, and eye/nose/mouth tokens cluster in the center.
 
 **Mini-GPT training log (epoch-by-epoch convergence):**
 
